@@ -250,7 +250,7 @@ kubectl port-forward svc/frontend 3000:80
 curl http://localhost:3000/health
 ```
 
-## 📊 **Data Architecture & Processing**
+## **Data Architecture & Processing**
 
 ### **Data Lake Organization**
 ```
@@ -350,30 +350,6 @@ Medium Priority (P3):
   - Capacity planning alerts
   - Certificate expiration warnings
 ```
-
-### **Dashboard URLs**
-- **Clinical Dashboard**: https://clinical.healthcare-platform.com
-- **Analytics Portal**: https://analytics.healthcare-platform.com
-- **Monitoring**: https://monitoring.healthcare-platform.com
-- **Security Center**: https://security.healthcare-platform.com
-
-##  **Contributing**
-
-We welcome contributions from the healthcare technology community! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
-
-### **Development Workflow**
-1. **Fork** the repository
-2. **Create** a feature branch (`git checkout -b feature/amazing-feature`)
-3. **Commit** your changes (`git commit -m 'Add amazing feature'`)
-4. **Push** to the branch (`git push origin feature/amazing-feature`)
-5. **Open** a Pull Request
-
-### **Code Standards**
-- **Python**: PEP 8, type hints, docstrings
-- **TypeScript**: ESLint, Prettier, strict mode
-- **Infrastructure**: Terraform best practices, security scanning
-- **Documentation**: Clear, comprehensive, up-to-date
-
 
 ## 📄 **License**
 
