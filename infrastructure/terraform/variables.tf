@@ -216,3 +216,20 @@ variable "acr_config" {
     public_network_access_enabled = false
   }
 }
+
+# API Management Configuration
+variable "api_management_publisher_email" {
+  description = "Email address for API Management publisher"
+  type        = string
+  default     = "admin@healthcare-platform.com"
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$", var.api_management_publisher_email))
+    error_message = "Publisher email must be a valid email address."
+  }
+}
+
+variable "domain_name" {
+  description = "Domain name for the platform"
+  type        = string
+  default     = "healthcare-platform.com"
+}

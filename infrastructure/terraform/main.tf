@@ -187,11 +187,27 @@ module "api_management" {
   environment        = local.environment
   project_name       = local.project_name
   unique_suffix      = local.unique_suffix
-  key_vault_id       = module.security.key_vault_id
-  subnet_id          = module.networking.apim_subnet_id
-  tags              = local.common_tags
   
-  depends_on = [module.security, module.networking]
+  # Publisher configuration
+  publisher_name  = "Healthcare Platform Admin"
+  publisher_email = var.api_management_publisher_email
+  
+  # VNet integration
+  virtual_network_type = "Internal"
+  subnet_id           = module.networking.apim_subnet_id
+  
+  # Backend configuration
+  backend_service_url = "https://backend.${var.domain_name}"
+  key_vault_url      = module.security.key_vault_uri
+  key_vault_id       = module.security.key_vault_id
+  tenant_id          = data.azurerm_client_config.current.tenant_id
+  
+  # Monitoring
+  log_analytics_workspace_id = module.monitoring.log_analytics_workspace_id
+  
+  tags = local.common_tags
+  
+  depends_on = [module.security, module.networking, module.monitoring]
 }
 
 # Monitoring and Logging
