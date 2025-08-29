@@ -1,0 +1,55 @@
+# API Gateway Dependencies
+# HIPAA-compliant API Gateway for healthcare platform
+
+# Core framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# HTTP client and networking
+httpx==0.25.2
+aiohttp==3.9.1
+
+# Rate limiting
+slowapi==0.1.9
+
+# Azure services
+azure-identity==1.15.0
+azure-keyvault-secrets==4.7.0
+azure-monitor-opentelemetry==1.2.0
+
+# Observability and monitoring
+opentelemetry-api==1.21.0
+opentelemetry-sdk==1.21.0
+opentelemetry-instrumentation-fastapi==0.42b0
+opentelemetry-instrumentation-httpx==0.42b0
+prometheus-client==0.19.0
+structlog==23.2.0
+
+# Caching and performance
+redis[hiredis]==5.0.1
+aioredis==2.0.1
+
+# Security and authentication
+cryptography==41.0.8
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Data validation and serialization
+marshmallow==3.20.2
+
+# Date and time handling
+python-dateutil==2.8.2
+
+# Development and testing (dev dependencies)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+black==23.11.0
+isort==5.12.0
+flake8==6.1.0
+mypy==1.7.1
+
+# Environment and configuration
+python-dotenv==1.0.0

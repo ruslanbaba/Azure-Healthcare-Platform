@@ -23,9 +23,14 @@ output "functions_subnet_id" {
   value       = azurerm_subnet.functions.id
 }
 
-output "apim_subnet_id" {
-  description = "API Management subnet ID"
-  value       = azurerm_subnet.apim.id
+output "monitoring_subnet_id" {
+  description = "ID of the monitoring subnet"
+  value       = azurerm_subnet.monitoring.id
+}
+
+output "monitoring_subnet_name" {
+  description = "Name of the monitoring subnet"
+  value       = azurerm_subnet.monitoring.name
 }
 
 output "gateway_subnet_id" {

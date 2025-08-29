@@ -233,3 +233,24 @@ variable "domain_name" {
   type        = string
   default     = "healthcare-platform.com"
 }
+
+# Alert Configuration
+variable "admin_email" {
+  description = "Administrator email for alerts"
+  type        = string
+  default     = "admin@healthcare-platform.com"
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$", var.admin_email))
+    error_message = "Admin email must be a valid email address."
+  }
+}
+
+variable "platform_team_email" {
+  description = "Platform team email for alerts"
+  type        = string
+  default     = "platform-team@healthcare-platform.com"
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$", var.platform_team_email))
+    error_message = "Platform team email must be a valid email address."
+  }
+}
