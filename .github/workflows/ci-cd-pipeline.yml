@@ -1,0 +1,726 @@
+# Advanced GitOps CI/CD Pipeline for Healthcare Platform
+# Multi-environment deployment with security scanning and compliance validation
+name: Healthcare Platform CI/CD
+
+on:
+  push:
+    branches: [ main, develop, 'feature/*', 'hotfix/*' ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    - cron: '0 2 * * *'  # Daily security scans
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - staging
+        - prod
+      skip_tests:
+        description: 'Skip test execution'
+        required: false
+        default: false
+        type: boolean
+      force_deploy:
+        description: 'Force deployment (skip approval gates)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  DOCKER_REGISTRY: ${{ secrets.ACR_NAME }}.azurecr.io
+  TERRAFORM_VERSION: '1.6.0'
+  KUBECTL_VERSION: '1.28.0'
+  HELM_VERSION: '3.13.0'
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '18'
+  SONAR_PROJECT_KEY: 'azure-healthcare-platform'
+
+jobs:
+  # Pre-flight validation and security checks
+  preflight:
+    name: 🔍 Pre-flight Validation
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      should_deploy: ${{ steps.conditions.outputs.should_deploy }}
+      target_env: ${{ steps.conditions.outputs.target_env }}
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: 🔐 Security Scan - Secrets
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: main
+        head: HEAD
+        extra_args: --debug --only-verified
+
+    - name: 🔍 SAST - Semgrep
+      uses: returntocorp/semgrep-action@v1
+      with:
+        config: >-
+          p/security-audit
+          p/secrets
+          p/owasp-top-ten
+          p/cwe-top-25
+          p/r2c-security-audit
+        generateSarif: "1"
+      env:
+        SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+
+    - name: 📋 Upload SARIF to GitHub
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: semgrep.sarif
+
+    - name: 🏗️ Set Build Matrix
+      id: set-matrix
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          matrix='{"environment": ["${{ github.event.inputs.environment }}"]}'
+        elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          matrix='{"environment": ["staging", "prod"]}'
+        elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+          matrix='{"environment": ["dev", "staging"]}'
+        else
+          matrix='{"environment": ["dev"]}'
+        fi
+        echo "matrix=$matrix" >> $GITHUB_OUTPUT
+
+    - name: 📊 Deployment Conditions
+      id: conditions
+      run: |
+        should_deploy="false"
+        target_env="dev"
+        
+        if [[ "${{ github.event_name }}" == "push" ]] && [[ "${{ github.ref }}" =~ ^refs/heads/(main|develop)$ ]]; then
+          should_deploy="true"
+        elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          should_deploy="true"
+          target_env="${{ github.event.inputs.environment }}"
+        fi
+        
+        echo "should_deploy=$should_deploy" >> $GITHUB_OUTPUT
+        echo "target_env=$target_env" >> $GITHUB_OUTPUT
+
+  # Comprehensive testing pipeline
+  test:
+    name: 🧪 Test Suite
+    runs-on: ubuntu-latest
+    needs: preflight
+    if: ${{ !github.event.inputs.skip_tests }}
+    
+    strategy:
+      matrix:
+        test-type: [unit, integration, security, performance, compliance]
+        
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🐍 Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: 📦 Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: 🔧 Configure Azure CLI
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: 📦 Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-test.txt
+        npm ci
+
+    - name: 🧪 Unit Tests
+      if: matrix.test-type == 'unit'
+      run: |
+        python -m pytest tests/unit/ \
+          --cov=src/ \
+          --cov-report=xml \
+          --cov-report=html \
+          --junit-xml=test-results/unit-tests.xml \
+          --cov-fail-under=85
+        
+        npm run test:unit -- --coverage --watchAll=false
+
+    - name: 🔗 Integration Tests
+      if: matrix.test-type == 'integration'
+      run: |
+        # Start test infrastructure
+        docker-compose -f docker-compose.test.yml up -d
+        
+        # Wait for services
+        ./scripts/wait-for-services.sh
+        
+        # Run integration tests
+        python -m pytest tests/integration/ \
+          --junit-xml=test-results/integration-tests.xml \
+          -v
+        
+        # Cleanup
+        docker-compose -f docker-compose.test.yml down
+
+    - name: 🛡️ Security Tests
+      if: matrix.test-type == 'security'
+      run: |
+        # OWASP ZAP Security Testing
+        docker run -v $(pwd):/zap/wrk/:rw \
+          -t owasp/zap2docker-stable zap-baseline.py \
+          -t http://localhost:8080 \
+          -g gen.conf \
+          -r security-report.html
+        
+        # Bandit Security Linting
+        bandit -r src/ -f json -o security-bandit.json
+        
+        # Safety check for known vulnerabilities
+        safety check --json --output safety-report.json
+
+    - name: ⚡ Performance Tests
+      if: matrix.test-type == 'performance'
+      run: |
+        # Load testing with Locust
+        pip install locust
+        locust -f tests/performance/locustfile.py \
+          --headless \
+          --users 100 \
+          --spawn-rate 10 \
+          --run-time 5m \
+          --host http://localhost:8080 \
+          --html performance-report.html
+        
+        # Database performance tests
+        python tests/performance/db_performance.py
+
+    - name: ✅ Compliance Tests
+      if: matrix.test-type == 'compliance'
+      run: |
+        # HIPAA Compliance validation
+        python tests/compliance/hipaa_compliance_test.py
+        
+        # SOC2 Controls testing
+        python tests/compliance/soc2_controls_test.py
+        
+        # Data encryption validation
+        python tests/compliance/encryption_test.py
+
+    - name: 📊 SonarQube Analysis
+      if: matrix.test-type == 'unit'
+      uses: sonarqube-quality-gate-action@master
+      env:
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      with:
+        scanMetadataReportFile: .scannerwork/report-task.txt
+
+    - name: 📋 Upload Test Results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results-${{ matrix.test-type }}
+        path: |
+          test-results/
+          coverage/
+          *.html
+          *.json
+          *.xml
+
+  # Container image build and security scanning
+  build:
+    name: 🏗️ Build & Scan Images
+    runs-on: ubuntu-latest
+    needs: [preflight, test]
+    if: ${{ always() && needs.preflight.result == 'success' }}
+    
+    strategy:
+      matrix:
+        service: [api-gateway, data-processor, analytics-engine, clinical-cdss, compliance-audit]
+    
+    outputs:
+      image-tags: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🔧 Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: 🔐 Login to Azure Container Registry
+      uses: azure/docker-login@v1
+      with:
+        login-server: ${{ env.DOCKER_REGISTRY }}
+        username: ${{ secrets.ACR_USERNAME }}
+        password: ${{ secrets.ACR_PASSWORD }}
+
+    - name: 📝 Extract Metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.DOCKER_REGISTRY }}/${{ matrix.service }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: 🏗️ Build and Push Image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: ./src/services/${{ matrix.service }}
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          BUILDKIT_INLINE_CACHE=1
+          BUILD_VERSION=${{ github.sha }}
+          BUILD_DATE=${{ github.event.head_commit.timestamp }}
+
+    - name: 🔍 Container Security Scan - Trivy
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.DOCKER_REGISTRY }}/${{ matrix.service }}:${{ github.sha }}
+        format: 'sarif'
+        output: 'trivy-results-${{ matrix.service }}.sarif'
+        severity: 'CRITICAL,HIGH'
+
+    - name: 📋 Upload Trivy Results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results-${{ matrix.service }}.sarif'
+
+    - name: 🔍 Container Security Scan - Snyk
+      uses: snyk/actions/docker@master
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        image: ${{ env.DOCKER_REGISTRY }}/${{ matrix.service }}:${{ github.sha }}
+        args: --severity-threshold=high --file=src/services/${{ matrix.service }}/Dockerfile
+
+    - name: 📦 Generate SBOM
+      uses: anchore/sbom-action@v0
+      with:
+        image: ${{ env.DOCKER_REGISTRY }}/${{ matrix.service }}:${{ github.sha }}
+        format: spdx-json
+        output-file: sbom-${{ matrix.service }}.spdx.json
+
+    - name: 📋 Upload SBOM
+      uses: actions/upload-artifact@v3
+      with:
+        name: sbom-${{ matrix.service }}
+        path: sbom-${{ matrix.service }}.spdx.json
+
+  # Infrastructure as Code validation and deployment
+  infrastructure:
+    name: 🏗️ Infrastructure Deployment
+    runs-on: ubuntu-latest
+    needs: [preflight, build]
+    if: ${{ needs.preflight.outputs.should_deploy == 'true' }}
+    
+    strategy:
+      matrix: ${{fromJson(needs.preflight.outputs.matrix)}}
+    
+    environment:
+      name: ${{ matrix.environment }}
+      url: ${{ steps.deploy.outputs.app_url }}
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🔧 Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+    - name: 🔐 Configure Azure Credentials
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: 🔍 Terraform Security Scan - Checkov
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: infrastructure/terraform
+        framework: terraform
+        output_format: sarif
+        output_file_path: checkov-terraform.sarif
+        download_external_modules: true
+
+    - name: 📋 Upload Checkov Results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: checkov-terraform.sarif
+
+    - name: 🔍 Terraform Security Scan - TFSec
+      uses: aquasecurity/tfsec-action@v1.0.3
+      with:
+        working_directory: infrastructure/terraform
+        format: sarif
+        soft_fail: true
+
+    - name: 🏗️ Terraform Init
+      run: |
+        cd infrastructure/terraform
+        terraform init \
+          -backend-config="storage_account_name=${{ secrets.TF_STATE_STORAGE_ACCOUNT }}" \
+          -backend-config="container_name=tfstate" \
+          -backend-config="key=${{ matrix.environment }}/terraform.tfstate" \
+          -backend-config="resource_group_name=${{ secrets.TF_STATE_RESOURCE_GROUP }}"
+
+    - name: 📋 Terraform Plan
+      id: plan
+      run: |
+        cd infrastructure/terraform
+        terraform plan \
+          -var-file="environments/${{ matrix.environment }}.tfvars" \
+          -var="container_image_tag=${{ github.sha }}" \
+          -out=tfplan \
+          -detailed-exitcode
+      env:
+        TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        TF_VAR_tenant_id: ${{ secrets.AZURE_TENANT_ID }}
+
+    - name: 💾 Save Terraform Plan
+      uses: actions/upload-artifact@v3
+      with:
+        name: tfplan-${{ matrix.environment }}
+        path: infrastructure/terraform/tfplan
+
+    - name: ✅ Terraform Apply
+      id: apply
+      if: ${{ (github.ref == 'refs/heads/main' && matrix.environment == 'prod') || github.event.inputs.force_deploy == 'true' || matrix.environment != 'prod' }}
+      run: |
+        cd infrastructure/terraform
+        terraform apply -auto-approve tfplan
+        
+        # Export outputs
+        echo "resource_group_name=$(terraform output -raw resource_group_name)" >> $GITHUB_OUTPUT
+        echo "aks_cluster_name=$(terraform output -raw aks_cluster_name)" >> $GITHUB_OUTPUT
+        echo "app_url=$(terraform output -raw app_url)" >> $GITHUB_OUTPUT
+
+    - name: 🔍 Infrastructure Compliance Scan
+      run: |
+        # Azure Policy compliance check
+        az policy state list \
+          --resource-group $(terraform output -raw resource_group_name) \
+          --query "[?complianceState=='NonCompliant']" \
+          --output table
+
+        # Security Center recommendations
+        az security assessment list \
+          --resource-group $(terraform output -raw resource_group_name) \
+          --query "[?status.cause=='Compliant']" \
+          --output table
+
+  # Kubernetes deployment with GitOps
+  deploy:
+    name: 🚀 Application Deployment
+    runs-on: ubuntu-latest
+    needs: [infrastructure, build]
+    if: ${{ needs.infrastructure.result == 'success' }}
+    
+    strategy:
+      matrix: ${{fromJson(needs.preflight.outputs.matrix)}}
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🔧 Setup Kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: ${{ env.KUBECTL_VERSION }}
+
+    - name: 🔧 Setup Helm
+      uses: azure/setup-helm@v3
+      with:
+        version: ${{ env.HELM_VERSION }}
+
+    - name: 🔐 Configure Azure Credentials
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: 🔗 Connect to AKS
+      run: |
+        az aks get-credentials \
+          --resource-group ${{ needs.infrastructure.outputs.resource_group_name }} \
+          --name ${{ needs.infrastructure.outputs.aks_cluster_name }} \
+          --overwrite-existing
+
+    - name: 🔍 Kubernetes Manifest Security Scan
+      uses: azure/k8s-lint@v1
+      with:
+        manifests: |
+          k8s/base/
+          k8s/overlays/${{ matrix.environment }}/
+
+    - name: 🏗️ Build Kustomization
+      run: |
+        cd k8s/overlays/${{ matrix.environment }}
+        kustomize edit set image \
+          api-gateway=${{ env.DOCKER_REGISTRY }}/api-gateway:${{ github.sha }} \
+          data-processor=${{ env.DOCKER_REGISTRY }}/data-processor:${{ github.sha }} \
+          analytics-engine=${{ env.DOCKER_REGISTRY }}/analytics-engine:${{ github.sha }} \
+          clinical-cdss=${{ env.DOCKER_REGISTRY }}/clinical-cdss:${{ github.sha }} \
+          compliance-audit=${{ env.DOCKER_REGISTRY }}/compliance-audit:${{ github.sha }}
+
+    - name: 🚀 Deploy Applications
+      run: |
+        # Deploy core platform
+        kubectl apply -k k8s/overlays/${{ matrix.environment }}
+        
+        # Deploy monitoring stack
+        helm upgrade --install monitoring-stack \
+          ./k8s/monitoring/prometheus-stack \
+          --namespace monitoring \
+          --create-namespace \
+          --values k8s/monitoring/values-${{ matrix.environment }}.yaml \
+          --wait --timeout=10m
+        
+        # Deploy observability stack
+        helm upgrade --install observability-stack \
+          ./k8s/monitoring/grafana-stack \
+          --namespace observability \
+          --create-namespace \
+          --values k8s/monitoring/observability-values-${{ matrix.environment }}.yaml \
+          --wait --timeout=10m
+
+    - name: ⏳ Wait for Deployment
+      run: |
+        kubectl rollout status deployment/api-gateway -n healthcare-platform --timeout=600s
+        kubectl rollout status deployment/data-processor -n healthcare-platform --timeout=600s
+        kubectl rollout status deployment/analytics-engine -n healthcare-platform --timeout=600s
+        kubectl rollout status deployment/clinical-cdss -n healthcare-platform --timeout=600s
+        kubectl rollout status deployment/compliance-audit -n healthcare-platform --timeout=600s
+
+    - name: 🏥 Health Check
+      run: |
+        # Wait for services to be ready
+        kubectl wait --for=condition=ready pod -l app=api-gateway -n healthcare-platform --timeout=300s
+        
+        # Test API endpoints
+        API_URL=$(kubectl get service api-gateway -n healthcare-platform -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        
+        curl -f http://${API_URL}/health || exit 1
+        curl -f http://${API_URL}/api/v1/health || exit 1
+
+    - name: 🔍 Post-Deployment Security Scan
+      run: |
+        # Scan running containers with Trivy
+        kubectl get pods -n healthcare-platform -o jsonpath='{.items[*].spec.containers[*].image}' | \
+        xargs -I {} trivy image --severity HIGH,CRITICAL {}
+        
+        # Check for security policies
+        kubectl get networkpolicies -n healthcare-platform
+        kubectl get podsecuritypolicies
+
+    - name: 📊 Performance Baseline
+      run: |
+        # Run basic performance tests
+        kubectl run loadtest --rm -i --tty --restart=Never \
+          --image=loadimpact/k6:latest -- \
+          run --vus 10 --duration 60s - <<EOF
+        import http from 'k6/http';
+        import { check } from 'k6';
+        
+        export default function() {
+          const response = http.get('http://api-gateway.healthcare-platform.svc.cluster.local/health');
+          check(response, {
+            'status is 200': (r) => r.status === 200,
+            'response time < 500ms': (r) => r.timings.duration < 500,
+          });
+        }
+        EOF
+
+  # Post-deployment validation and notifications
+  validate:
+    name: ✅ Post-Deployment Validation
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: ${{ always() && needs.deploy.result == 'success' }}
+    
+    strategy:
+      matrix: ${{fromJson(needs.preflight.outputs.matrix)}}
+    
+    steps:
+    - name: 📥 Checkout Code
+      uses: actions/checkout@v4
+
+    - name: 🔐 Configure Azure Credentials
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: 🔗 Connect to AKS
+      run: |
+        az aks get-credentials \
+          --resource-group ${{ needs.infrastructure.outputs.resource_group_name }} \
+          --name ${{ needs.infrastructure.outputs.aks_cluster_name }} \
+          --overwrite-existing
+
+    - name: 🧪 End-to-End Tests
+      run: |
+        # Run comprehensive E2E tests
+        python -m pytest tests/e2e/ \
+          --environment=${{ matrix.environment }} \
+          --base-url=${{ needs.infrastructure.outputs.app_url }} \
+          --junit-xml=e2e-results.xml \
+          -v
+
+    - name: 🔍 Compliance Validation
+      run: |
+        # HIPAA compliance check
+        python scripts/compliance_check.py \
+          --framework=hipaa \
+          --environment=${{ matrix.environment }}
+        
+        # SOC2 controls validation
+        python scripts/compliance_check.py \
+          --framework=soc2 \
+          --environment=${{ matrix.environment }}
+
+    - name: 📊 Generate Deployment Report
+      run: |
+        # Create deployment summary
+        cat > deployment-report-${{ matrix.environment }}.md << EOF
+        # Deployment Report - ${{ matrix.environment }}
+        
+        **Deployment Time:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        **Git Commit:** ${{ github.sha }}
+        **Branch:** ${{ github.ref_name }}
+        **Environment:** ${{ matrix.environment }}
+        **Application URL:** ${{ needs.infrastructure.outputs.app_url }}
+        
+        ## Deployment Summary
+        - ✅ Infrastructure provisioned successfully
+        - ✅ Applications deployed successfully
+        - ✅ Health checks passed
+        - ✅ Security scans completed
+        - ✅ Compliance validation passed
+        
+        ## Services Deployed
+        $(kubectl get deployments -n healthcare-platform -o custom-columns=NAME:.metadata.name,READY:.status.readyReplicas,UP-TO-DATE:.status.updatedReplicas,AVAILABLE:.status.availableReplicas --no-headers)
+        
+        ## Security Findings
+        $(kubectl get networkpolicies -n healthcare-platform --no-headers | wc -l) Network Policies active
+        $(kubectl get podsecuritypolicies --no-headers | wc -l) Pod Security Policies active
+        
+        ## Next Steps
+        - Monitor application metrics in Grafana
+        - Review security alerts in Azure Security Center
+        - Validate compliance dashboards
+        EOF
+
+    - name: 📋 Upload Deployment Report
+      uses: actions/upload-artifact@v3
+      with:
+        name: deployment-report-${{ matrix.environment }}
+        path: deployment-report-${{ matrix.environment }}.md
+
+    - name: 📢 Slack Notification
+      uses: 8398a7/action-slack@v3
+      if: always()
+      with:
+        status: ${{ job.status }}
+        channel: '#healthcare-deployments'
+        username: 'GitHub Actions'
+        icon_emoji: ':hospital:'
+        title: 'Healthcare Platform Deployment'
+        text: |
+          Environment: ${{ matrix.environment }}
+          Status: ${{ job.status }}
+          Commit: ${{ github.sha }}
+          URL: ${{ needs.infrastructure.outputs.app_url }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    - name: 📧 Teams Notification
+      uses: aliencube/microsoft-teams-actions@v0.8.0
+      if: failure()
+      with:
+        webhook_uri: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        title: 'Healthcare Platform Deployment Failed'
+        summary: 'Deployment to ${{ matrix.environment }} has failed'
+        theme_color: 'ff0000'
+        sections: |
+          [
+            {
+              "activityTitle": "Deployment Failure",
+              "activitySubtitle": "Environment: ${{ matrix.environment }}",
+              "facts": [
+                {
+                  "name": "Repository",
+                  "value": "${{ github.repository }}"
+                },
+                {
+                  "name": "Commit",
+                  "value": "${{ github.sha }}"
+                },
+                {
+                  "name": "Branch",
+                  "value": "${{ github.ref_name }}"
+                },
+                {
+                  "name": "Workflow",
+                  "value": "${{ github.workflow }}"
+                }
+              ]
+            }
+          ]
+
+  # Cleanup and rollback capabilities
+  cleanup:
+    name: 🧹 Cleanup
+    runs-on: ubuntu-latest
+    needs: [validate]
+    if: ${{ always() }}
+    
+    steps:
+    - name: 🧹 Clean Up Artifacts
+      run: |
+        # Clean up old container images (keep last 10)
+        az acr repository show-tags \
+          --name ${{ secrets.ACR_NAME }} \
+          --repository api-gateway \
+          --output tsv \
+          --query '[10:].name' | \
+        xargs -I {} az acr repository delete \
+          --name ${{ secrets.ACR_NAME }} \
+          --image api-gateway:{} \
+          --yes
+
+    - name: 📊 Update Deployment Metrics
+      run: |
+        # Send deployment metrics to Azure Monitor
+        echo "Deployment completed for commit ${{ github.sha }}"
