@@ -1,10 +1,4 @@
 # Azure Healthcare Analytics Platform
-
-> **Enterprise-Grade HIPAA-Compliant Healthcare Analytics Platform**  
-> *Designed and deployed a comprehensive analytics platform using Azure Data Lake, AKS, and Azure Functions. Automated data processing for 150M+ patient records, reducing query times by 40% and enabling faster clinical decision-making.*
-
-## **Platform Overview**
-
 The Azure Healthcare Analytics Platform represents a cutting-edge, enterprise-ready solution that transforms healthcare data into actionable insights while maintaining the highest standards of security, compliance, and performance. Built on Azure's cloud-native services, this platform processes over 150 million patient records with 40% improved query performance and real-time clinical decision support.
 
 ### ** Key Achievements**
