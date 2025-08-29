@@ -1,0 +1,278 @@
+# Default values for healthcare-platform
+# This is a YAML-formatted file.
+
+# Global configuration
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+  environment: "prod"
+  region: "eastus2"
+
+# Application configuration
+app:
+  name: healthcare-platform
+  version: "1.0.0"
+
+# Image configuration
+image:
+  registry: healthcareanalyticsacr.azurecr.io
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+# Replica configuration
+replicaCount:
+  dataProcessor: 3
+  apiGateway: 2
+  analyticsEngine: 2
+
+# Resource configuration
+resources:
+  dataProcessor:
+    requests:
+      memory: "1Gi"
+      cpu: "500m"
+    limits:
+      memory: "2Gi"
+      cpu: "1000m"
+  apiGateway:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+  analyticsEngine:
+    requests:
+      memory: "2Gi"
+      cpu: "1000m"
+    limits:
+      memory: "4Gi"
+      cpu: "2000m"
+
+# Autoscaling configuration
+autoscaling:
+  enabled: true
+  minReplicas:
+    dataProcessor: 2
+    apiGateway: 2
+    analyticsEngine: 1
+  maxReplicas:
+    dataProcessor: 10
+    apiGateway: 5
+    analyticsEngine: 5
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# Service configuration
+service:
+  type: ClusterIP
+  ports:
+    dataProcessor: 8080
+    apiGateway: 8081
+    analyticsEngine: 8082
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+  hosts:
+    - host: api.healthcareanalytics.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: api-gateway
+    - host: analytics.healthcareanalytics.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: analytics-engine
+  tls:
+    - secretName: healthcare-platform-tls
+      hosts:
+        - api.healthcareanalytics.com
+        - analytics.healthcareanalytics.com
+
+# Network policies
+networkPolicies:
+  enabled: true
+  policyTypes:
+    - Ingress
+    - Egress
+
+# Pod Security Context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 3000
+  fsGroup: 2000
+  seccompProfile:
+    type: RuntimeDefault
+
+# Security Context
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# Health checks
+healthChecks:
+  enabled: true
+  readinessProbe:
+    httpGet:
+      path: /health/ready
+      port: 8080
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  livenessProbe:
+    httpGet:
+      path: /health/live
+      port: 8080
+    initialDelaySeconds: 60
+    periodSeconds: 30
+    timeoutSeconds: 10
+    failureThreshold: 3
+
+# Environment variables
+env:
+  # Azure Configuration
+  AZURE_TENANT_ID: ""
+  AZURE_CLIENT_ID: ""
+  STORAGE_ACCOUNT_NAME: ""
+  KEY_VAULT_URL: ""
+  
+  # Application Configuration
+  LOG_LEVEL: "INFO"
+  METRICS_ENABLED: "true"
+  TRACING_ENABLED: "true"
+  
+  # HIPAA Compliance
+  ENCRYPTION_ENABLED: "true"
+  AUDIT_LOGGING_ENABLED: "true"
+  PHI_DETECTION_ENABLED: "true"
+
+# Azure Workload Identity
+workloadIdentity:
+  enabled: true
+  serviceAccountName: healthcare-platform-sa
+  clientId: ""
+
+# Secrets (will be created from Azure Key Vault)
+secrets:
+  createFromKeyVault: true
+  keyVaultName: ""
+  secrets:
+    - secretName: storage-connection-string
+      keyVaultSecretName: storage-connection-string
+    - secretName: database-connection-string
+      keyVaultSecretName: database-connection-string
+    - secretName: encryption-key
+      keyVaultSecretName: data-encryption-key
+
+# ConfigMaps
+configMaps:
+  dataProcessor:
+    BATCH_SIZE: "1000"
+    MAX_RETRY_ATTEMPTS: "3"
+    PROCESSING_TIMEOUT: "300"
+  apiGateway:
+    RATE_LIMIT_REQUESTS: "1000"
+    RATE_LIMIT_WINDOW: "60"
+    CORS_ENABLED: "true"
+  analyticsEngine:
+    QUERY_TIMEOUT: "600"
+    CACHE_TTL: "3600"
+    MAX_CONCURRENT_QUERIES: "10"
+
+# Persistent Volumes
+persistence:
+  enabled: true
+  storageClass: "managed-premium"
+  accessMode: ReadWriteOnce
+  size:
+    logs: 10Gi
+    cache: 5Gi
+
+# Monitoring configuration
+monitoring:
+  enabled: true
+  prometheus:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+      path: /metrics
+  grafana:
+    enabled: true
+    dashboards:
+      enabled: true
+  alerts:
+    enabled: true
+    rules:
+      - name: high-cpu-usage
+        condition: "cpu_usage > 80"
+        duration: "5m"
+      - name: high-memory-usage
+        condition: "memory_usage > 85"
+        duration: "5m"
+      - name: pod-restart
+        condition: "increase(kube_pod_container_status_restarts_total[5m]) > 0"
+
+# Backup configuration
+backup:
+  enabled: true
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  retention: "30d"
+
+# Cert-manager configuration
+certManager:
+  enabled: true
+  issuer:
+    name: letsencrypt-prod
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@healthcareanalytics.com
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable:
+    dataProcessor: 1
+    apiGateway: 1
+    analyticsEngine: 1
+
+# Annotations
+annotations:
+  deployment:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
+  pod:
+    sidecar.istio.io/inject: "false"  # Disable Istio if not using service mesh
+
+# Node affinity and tolerations
+nodeAffinity:
+  requiredDuringSchedulingIgnoredDuringExecution:
+    nodeSelectorTerms:
+      - matchExpressions:
+          - key: kubernetes.io/arch
+            operator: In
+            values:
+              - amd64
+
+tolerations: []
+
+# Pod anti-affinity for high availability
+podAntiAffinity:
+  enabled: true
+  topologyKey: kubernetes.io/hostname

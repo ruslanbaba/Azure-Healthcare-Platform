@@ -1,0 +1,244 @@
+name: Azure Healthcare Platform CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+  ACR_NAME: ${{ secrets.ACR_NAME }}
+
+jobs:
+  # Security and Code Quality Checks
+  security-scan:
+    runs-on: ubuntu-latest
+    name: Security Scan
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Run Checkov static analysis
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: infrastructure/terraform
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+
+  # Terraform Infrastructure
+  terraform:
+    runs-on: ubuntu-latest
+    name: Terraform
+    needs: security-scan
+    strategy:
+      matrix:
+        environment: [dev, prod]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        working-directory: infrastructure/terraform
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=tf-state-rg" \
+            -backend-config="storage_account_name=tfstate${{ matrix.environment }}" \
+            -backend-config="container_name=tfstate" \
+            -backend-config="key=${{ matrix.environment }}.terraform.tfstate"
+        working-directory: infrastructure/terraform
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: infrastructure/terraform
+
+      - name: Terraform Plan
+        run: |
+          terraform plan \
+            -var-file="environments/${{ matrix.environment }}.tfvars" \
+            -out=${{ matrix.environment }}.tfplan
+        working-directory: infrastructure/terraform
+
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v3
+        with:
+          name: terraform-plan-${{ matrix.environment }}
+          path: infrastructure/terraform/${{ matrix.environment }}.tfplan
+
+      - name: Terraform Apply (Production only on main branch)
+        if: github.ref == 'refs/heads/main' && matrix.environment == 'prod'
+        run: terraform apply -auto-approve ${{ matrix.environment }}.tfplan
+        working-directory: infrastructure/terraform
+
+      - name: Terraform Apply (Development)
+        if: github.ref == 'refs/heads/develop' && matrix.environment == 'dev'
+        run: terraform apply -auto-approve ${{ matrix.environment }}.tfplan
+        working-directory: infrastructure/terraform
+
+  # Build and Push Container Images
+  build-and-push:
+    runs-on: ubuntu-latest
+    name: Build and Push Images
+    needs: terraform
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    strategy:
+      matrix:
+        service: [data-processor, api-gateway, analytics-engine]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to Azure Container Registry
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ env.ACR_NAME }}.azurecr.io
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.service }}:${{ github.sha }} \
+            -f applications/${{ matrix.service }}/Dockerfile \
+            applications/${{ matrix.service }}
+          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.service }}:${{ github.sha }}
+
+      - name: Tag as latest for main branch
+        if: github.ref == 'refs/heads/main'
+        run: |
+          docker tag ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.service }}:${{ github.sha }} \
+            ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.service }}:latest
+          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ matrix.service }}:latest
+
+  # Deploy to Kubernetes
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy to AKS
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    strategy:
+      matrix:
+        environment: [dev, prod]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set environment
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "ENVIRONMENT=prod" >> $GITHUB_ENV
+          else
+            echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+          fi
+
+      - name: Skip if environment doesn't match
+        if: env.ENVIRONMENT != matrix.environment
+        run: exit 0
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group healthcare-analytics-${{ matrix.environment }}-compute-rg \
+            --name healthcare-analytics-${{ matrix.environment }}-aks \
+            --overwrite-existing
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: '3.12.0'
+
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install healthcare-platform \
+            ./charts/healthcare-platform \
+            --namespace healthcare-platform \
+            --create-namespace \
+            --values ./charts/healthcare-platform/values-${{ matrix.environment }}.yaml \
+            --set image.tag=${{ github.sha }} \
+            --wait
+
+  # Post-deployment tests
+  integration-tests:
+    runs-on: ubuntu-latest
+    name: Integration Tests
+    needs: deploy
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pytest requests azure-identity azure-storage-blob
+
+      - name: Run integration tests
+        run: |
+          python -m pytest tests/integration/ -v
+        env:
+          AZURE_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+
+  # Notify on completion
+  notify:
+    runs-on: ubuntu-latest
+    name: Notify
+    needs: [terraform, build-and-push, deploy, integration-tests]
+    if: always()
+    steps:
+      - name: Notify Teams
+        uses: aliencube/microsoft-teams-actions@v0.8.0
+        with:
+          webhook_uri: ${{ secrets.TEAMS_WEBHOOK_URI }}
+          title: Healthcare Platform Deployment
+          summary: Deployment completed for ${{ github.ref }}
+          sections: |
+            [
+              {
+                "activityTitle": "Deployment Status",
+                "activitySubtitle": "${{ job.status }}",
+                "facts": [
+                  {
+                    "name": "Branch",
+                    "value": "${{ github.ref }}"
+                  },
+                  {
+                    "name": "Commit",
+                    "value": "${{ github.sha }}"
+                  }
+                ]
+              }
+            ]
