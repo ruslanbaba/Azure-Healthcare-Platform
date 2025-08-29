@@ -16,21 +16,13 @@ Enterprise-grade HIPAA-compliant healthcare analytics platform built on Azure cl
 
 ## Key Features
 
-- ✅ HIPAA-compliant data processing
-- ✅ 40% query performance improvement
-- ✅ Auto-scaling microservices architecture
-- ✅ Zero-trust security model
-- ✅ GitOps-based CI/CD pipeline
-- ✅ Comprehensive monitoring and alerting
-- ✅ Disaster recovery and backup
-- ✅ Multi-environment deployment (dev/staging/prod)
-
-## Quick Start
-
-1. **Prerequisites**: Azure CLI, Terraform, Kubectl, Docker
-2. **Infrastructure**: Deploy using Terraform modules
-3. **Applications**: Deploy using GitOps with ArgoCD
-4. **Monitoring**: Configure alerts and dashboards
+- HIPAA-compliant data processing
+- Auto-scaling microservices architecture
+- Zero-trust security model
+- GitOps-based CI/CD pipeline
+- Comprehensive monitoring and alerting
+- Disaster recovery and backup
+- Multi-environment deployment (dev/staging/prod)
 
 ## Security & Compliance
 
@@ -39,11 +31,3 @@ Enterprise-grade HIPAA-compliant healthcare analytics platform built on Azure cl
 - Network security groups and firewalls
 - Audit logging and compliance reporting
 - PHI data masking and anonymization
-
-## Documentation
-
-- [Architecture Guide](docs/architecture.md)
-- [Deployment Guide](docs/deployment.md)
-- [Security Guide](docs/security.md)
-- [API Documentation](docs/api.md)
-- [Monitoring Guide](docs/monitoring.md)
